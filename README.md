@@ -1,0 +1,1 @@
+Set BOT_TOKEN then run: python bot.py
