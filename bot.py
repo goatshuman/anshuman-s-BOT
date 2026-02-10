@@ -266,27 +266,32 @@ async def youtube_check():
     data = load_data()
     last_video = data.get("_last_video")
 
-    url = (
-        "https://www.googleapis.com/youtube/v3/search"
-        f"?part=snippet"
-        f"&channelId={YOUTUBE_CHANNEL_ID}"
-        f"&order=date"
-        f"&maxResults=1"
-        f"&type=video"
-        f"&key={YOUTUBE_API_KEY}"
+    # 1️⃣ Get uploads playlist ID
+    channel_url = (
+        "https://www.googleapis.com/youtube/v3/channels"
+        f"?part=contentDetails&id={YOUTUBE_CHANNEL_ID}&key={YOUTUBE_API_KEY}"
     )
 
-    r = requests.get(url)
-    if r.status_code != 200:
-        print("❌ YouTube API error:", r.text)
+    ch_res = requests.get(channel_url)
+    if ch_res.status_code != 200:
+        print("❌ Channel API error:", ch_res.text)
         return
 
-    items = r.json().get("items", [])
-    if not items:
+    uploads_id = ch_res.json()["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+
+    # 2️⃣ Get latest upload from uploads playlist
+    playlist_url = (
+        "https://www.googleapis.com/youtube/v3/playlistItems"
+        f"?part=snippet&playlistId={uploads_id}&maxResults=1&key={YOUTUBE_API_KEY}"
+    )
+
+    pl_res = requests.get(playlist_url)
+    if pl_res.status_code != 200:
+        print("❌ Playlist API error:", pl_res.text)
         return
 
-    video = items[0]
-    video_id = video["id"]["videoId"]
+    item = pl_res.json()["items"][0]
+    video_id = item["snippet"]["resourceId"]["videoId"]
 
     if video_id == last_video:
         return
@@ -294,12 +299,12 @@ async def youtube_check():
     data["_last_video"] = video_id
     save_data(data)
 
-    title = video["snippet"]["title"]
-    thumbnail = video["snippet"]["thumbnails"]["high"]["url"]
+    title = item["snippet"]["title"]
+    thumbnail = item["snippet"]["thumbnails"]["high"]["url"]
     link = f"https://www.youtube.com/watch?v={video_id}"
 
-    ch = bot.get_channel(YOUTUBE_CH)
-    if ch:
+    channel = bot.get_channel(YOUTUBE_CH)
+    if channel:
         embed = discord.Embed(
             title=title,
             url=link,
@@ -307,7 +312,7 @@ async def youtube_check():
             color=CYAN
         )
         embed.set_image(url=thumbnail)
-        await ch.send(embed=embed)
+        await channel.send(embed=embed)
 
         print("✅ YouTube notification sent:", title)
 
