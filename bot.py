@@ -9,24 +9,26 @@ import discord
 from discord.ext import commands, tasks
 from keep_alive import keep_alive
 
-# ================= CONFIG =================
+# ================= BASIC CONFIG =================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
 
 CYAN = 0x00E5FF
 
-# -------- CHANNEL IDS --------
+DATA_PATH = "data/users.json"
+
+# ================= CHANNEL IDS =================
+
 WELCOME_CH = 1469368246468612280
 YOUTUBE_CH = 1469374072134570054
+ACHIEVEMENT_CH = 1470771286278934640
 
 FITNESS_CH = 1469378149526540530
 READING_CH = 1469376564805369866
 MEDITATION_CH = 1469376651879252059
 RESULTS_CH = 1469378406582980850
 STAFF_CH = 1469337120526303366
-
-ACHIEVEMENT_CH = 1470771286278934640
 
 XP_CHANNELS = [
     FITNESS_CH,
@@ -36,7 +38,8 @@ XP_CHANNELS = [
     STAFF_CH
 ]
 
-# -------- ROLES --------
+# ================= ROLE IDS =================
+
 AUTO_MEMBER_ROLE = 1469697770817585376
 FOCUS_ROLE = 1469680976992014438
 
@@ -47,13 +50,12 @@ ROLES = {
     "elite": 1470768181269500161,
     "reader": 1470768616801697822,
     "focused": 1470768907487805543,
-    "proof": 1470768796800123055,
+    "proof": 1470768796800123055
 }
 
-# -------- YOUTUBE (CONFIRMED CHANNEL ID) --------
-YOUTUBE_CHANNEL_ID = "UCtHcUANC5lCC9E-HbXRq7Eg"
+# ================= YOUTUBE =================
 
-DATA_PATH = "data/users.json"
+YOUTUBE_CHANNEL_ID = "UCtHcUANC5lCC9E-HbXRq7Eg"
 
 # ================= BOT SETUP =================
 
@@ -63,7 +65,7 @@ intents.message_content = True
 
 bot = commands.Bot(command_prefix="$", intents=intents)
 
-# ================= DATA =================
+# ================= DATA HANDLING =================
 
 def load_data():
     if not os.path.exists(DATA_PATH):
@@ -89,8 +91,8 @@ def get_user(data, uid):
 
 def parse_time(text):
     text = text.lower()
-    h = re.search(r"(\\d+)\\s*(h|hr|hour)", text)
-    m = re.search(r"(\\d+)\\s*(m|min|minute)", text)
+    h = re.search(r"(\d+)\s*(h|hr|hour)", text)
+    m = re.search(r"(\d+)\s*(m|min|minute)", text)
     if h:
         return int(h.group(1)) * 60
     if m:
@@ -107,10 +109,11 @@ def level_from_xp(xp):
     return "beginner"
 
 async def update_level(member, lvl):
-    for k in ["beginner", "consistent", "disciplined", "elite"]:
-        role = member.guild.get_role(ROLES[k])
+    for r in ["beginner", "consistent", "disciplined", "elite"]:
+        role = member.guild.get_role(ROLES[r])
         if role and role in member.roles:
             await member.remove_roles(role)
+
     await member.add_roles(member.guild.get_role(ROLES[lvl]))
 
 async def announce(guild, text):
@@ -133,13 +136,13 @@ async def on_member_join(member):
 
     ch = member.guild.get_channel(WELCOME_CH)
     if ch:
-        embed = discord.Embed(
+        e = discord.Embed(
             title="Welcome",
             description=f"Welcome {member.mention}",
             color=CYAN
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        await ch.send(embed=embed)
+        e.set_thumbnail(url=member.display_avatar.url)
+        await ch.send(embed=e)
 
 @bot.event
 async def on_message(message):
@@ -194,11 +197,11 @@ async def wins(interaction: discord.Interaction, text: str, image: discord.Attac
 
     save_data(data)
 
-    embed = discord.Embed(description=text, color=CYAN)
+    e = discord.Embed(description=text, color=CYAN)
     if image:
-        embed.set_image(url=image.url)
+        e.set_image(url=image.url)
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=e)
 
 @bot.tree.command(name="focus")
 async def focus(interaction: discord.Interaction, duration: str):
@@ -233,16 +236,16 @@ async def profile(ctx, member: discord.Member = None):
     data = load_data()
     u = get_user(data, m.id)
 
-    embed = discord.Embed(title=f"Profile – {m.name}", color=CYAN)
-    embed.add_field(name="XP", value=u["xp"])
-    embed.add_field(name="Streak", value=u["streak"])
-    embed.add_field(
+    e = discord.Embed(title=f"Profile – {m.name}", color=CYAN)
+    e.add_field(name="XP", value=u["xp"])
+    e.add_field(name="Streak", value=u["streak"])
+    e.add_field(
         name="Achievements",
         value=", ".join(u["achievements"]) or "None",
         inline=False
     )
 
-    await ctx.send(embed=embed)
+    await ctx.send(embed=e)
 
 @bot.command()
 async def leaderboard(ctx):
@@ -255,39 +258,34 @@ async def leaderboard(ctx):
 
     await ctx.send(embed=discord.Embed(title="Leaderboard", description=desc, color=CYAN))
 
-# ================= YOUTUBE (FAST, CORRECT) =================
+# ================= YOUTUBE NOTIFIER =================
 
 @tasks.loop(seconds=30)
 async def youtube_check():
     if not YOUTUBE_API_KEY:
-        print("❌ Missing YOUTUBE_API_KEY")
         return
 
     data = load_data()
     last_video = data.get("_last_video")
 
-    # 1️⃣ Get uploads playlist ID
-    channel_url = (
+    ch_url = (
         "https://www.googleapis.com/youtube/v3/channels"
         f"?part=contentDetails&id={YOUTUBE_CHANNEL_ID}&key={YOUTUBE_API_KEY}"
     )
 
-    ch_res = requests.get(channel_url)
+    ch_res = requests.get(ch_url)
     if ch_res.status_code != 200:
-        print("❌ Channel API error:", ch_res.text)
         return
 
     uploads_id = ch_res.json()["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
-    # 2️⃣ Get latest upload from uploads playlist
-    playlist_url = (
+    pl_url = (
         "https://www.googleapis.com/youtube/v3/playlistItems"
         f"?part=snippet&playlistId={uploads_id}&maxResults=1&key={YOUTUBE_API_KEY}"
     )
 
-    pl_res = requests.get(playlist_url)
+    pl_res = requests.get(pl_url)
     if pl_res.status_code != 200:
-        print("❌ Playlist API error:", pl_res.text)
         return
 
     item = pl_res.json()["items"][0]
@@ -300,7 +298,7 @@ async def youtube_check():
     save_data(data)
 
     title = item["snippet"]["title"]
-    thumbnail = item["snippet"]["thumbnails"]["high"]["url"]
+    thumb = item["snippet"]["thumbnails"]["high"]["url"]
     link = f"https://www.youtube.com/watch?v={video_id}"
 
     channel = bot.get_channel(YOUTUBE_CH)
@@ -311,10 +309,13 @@ async def youtube_check():
             description="New video is live 🎥",
             color=CYAN
         )
-        embed.set_image(url=thumbnail)
-        await channel.send(embed=embed)
+        embed.set_image(url=thumb)
 
-        print("✅ YouTube notification sent:", title)
+        await channel.send(
+            content="@everyone",
+            embed=embed,
+            allowed_mentions=discord.AllowedMentions(everyone=True)
+        )
 
 # ================= START =================
 
