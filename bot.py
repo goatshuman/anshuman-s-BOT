@@ -58,10 +58,7 @@ YOUTUBE_CHANNEL_ID = "UCtHcUANC5lCC9E-HbXRq7Eg"
 
 # ================= BOT SETUP =================
 
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-
+intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="$", intents=intents)
 
 # ================= DATA =================
@@ -83,7 +80,9 @@ def get_user(data, uid):
         "last_day": None,
         "daily": {},
         "achievements": [],
-        "wins": []
+        "wins": [],
+        "intro": None,
+        "checkins": []
     })
 
 # ================= UTIL =================
@@ -119,20 +118,16 @@ async def announce(guild, text):
     if ch:
         await ch.send(embed=discord.Embed(description=text, color=CYAN))
 
-# ================= EVENTS =================
+# ================= READY =================
 
 @bot.event
 async def on_ready():
     print("BOT ONLINE")
-
-    # 🔥 SLASH COMMAND SYNC FIX
-    try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} slash commands")
-    except Exception as e:
-        print("Slash sync failed:", e)
-
+    await bot.tree.sync()
+    print("Slash commands synced")
     youtube_check.start()
+
+# ================= MEMBER JOIN =================
 
 @bot.event
 async def on_member_join(member):
@@ -147,8 +142,9 @@ async def on_member_join(member):
             description=f"Welcome {member.mention}",
             color=CYAN
         )
-        embed.set_thumbnail(url=member.display_avatar.url)
         await ch.send(embed=embed)
+
+# ================= XP SYSTEM =================
 
 @bot.event
 async def on_message(message):
@@ -168,75 +164,121 @@ async def on_message(message):
             user["streak"] += 1
             user["last_day"] = today
 
-        if message.channel.id == READING_CH and "reader" not in user["achievements"]:
-            user["achievements"].append("reader")
-            await message.author.add_roles(message.guild.get_role(ROLES["reader"]))
-            await announce(message.guild, f"📚 {message.author.mention} unlocked **Reader**")
-
-        if message.channel.id == MEDITATION_CH and "focused" not in user["achievements"]:
-            user["achievements"].append("focused")
-            await message.author.add_roles(message.guild.get_role(ROLES["focused"]))
-            await announce(message.guild, f"🧠 {message.author.mention} unlocked **Focused Mind**")
-
         await update_level(message.author, level_from_xp(user["xp"]))
 
     save_data(data)
     await bot.process_commands(message)
 
-# ================= SLASH COMMANDS =================
+# ================= INTRODUCE =================
 
-@bot.tree.command(name="wins")
-async def wins(interaction: discord.Interaction, text: str, image: discord.Attachment = None):
+@bot.tree.command(name="introduce")
+async def introduce(
+    interaction: discord.Interaction,
+    name: str,
+    age: int,
+    location: str,
+    goals: str,
+    picture: discord.Attachment = None
+):
     data = load_data()
     user = get_user(data, interaction.user.id)
 
-    user["wins"].append({
-        "date": str(datetime.utcnow().date()),
-        "text": text,
-        "image": image.url if image else None
-    })
-
-    if "proof" not in user["achievements"]:
-        user["achievements"].append("proof")
-        await interaction.user.add_roles(interaction.guild.get_role(ROLES["proof"]))
-        await announce(interaction.guild, f"🏆 {interaction.user.mention} unlocked **Proof of Work**")
+    user["intro"] = {
+        "name": name,
+        "age": age,
+        "location": location,
+        "goals": goals,
+        "picture": picture.url if picture else None
+    }
 
     save_data(data)
 
-    embed = discord.Embed(description=text, color=CYAN)
-    if image:
-        embed.set_image(url=image.url)
+    embed = discord.Embed(title=f"{name}'s Introduction", color=CYAN)
+    embed.add_field(name="Age", value=age)
+    embed.add_field(name="Location", value=location)
+    embed.add_field(name="Goals", value=goals, inline=False)
+
+    if picture:
+        embed.set_image(url=picture.url)
 
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="focus")
-async def focus(interaction: discord.Interaction, duration: str):
-    mins = parse_time(duration)
-    if not mins:
-        await interaction.response.send_message(
-            embed=discord.Embed(description="Invalid time format", color=CYAN)
-        )
+@bot.command()
+async def introduce(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    data = load_data()
+
+    user_data = data.get(str(target.id))
+    if not user_data or not user_data.get("intro"):
+        await ctx.send(embed=discord.Embed(
+            description="User has not introduced themselves yet.",
+            color=CYAN
+        ))
         return
 
-    role = interaction.guild.get_role(FOCUS_ROLE)
-    if role:
-        await interaction.user.add_roles(role)
+    intro = user_data["intro"]
 
-    await interaction.response.send_message(
-        embed=discord.Embed(description=f"Locked in for {mins} minutes.", color=CYAN)
+    embed = discord.Embed(title=f"{intro['name']}'s Introduction", color=CYAN)
+    embed.add_field(name="Age", value=intro["age"])
+    embed.add_field(name="Location", value=intro["location"])
+    embed.add_field(name="Goals", value=intro["goals"], inline=False)
+
+    if intro["picture"]:
+        embed.set_image(url=intro["picture"])
+
+    await ctx.send(embed=embed)
+
+# ================= CHECKIN =================
+
+@bot.tree.command(name="checkin")
+async def checkin(interaction: discord.Interaction, message: str):
+    data = load_data()
+    user = get_user(data, interaction.user.id)
+
+    entry = {
+        "date": str(datetime.utcnow().date()),
+        "message": message
+    }
+
+    user["checkins"].append(entry)
+    save_data(data)
+
+    embed = discord.Embed(
+        title="Check-in Recorded",
+        description=message,
+        color=CYAN
     )
 
-    await asyncio.sleep(mins * 60)
+    await interaction.response.send_message(embed=embed)
 
-    if role:
-        await interaction.user.remove_roles(role)
+@bot.command()
+async def checkin(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    data = load_data()
 
-    try:
-        await interaction.user.send("Lock-in complete. Take some rest.")
-    except:
-        pass
+    user_data = data.get(str(target.id))
+    if not user_data or not user_data.get("checkins"):
+        await ctx.send(embed=discord.Embed(
+            description="No check-ins found.",
+            color=CYAN
+        ))
+        return
 
-# ================= PREFIX COMMANDS =================
+    recent = user_data["checkins"][-5:]
+    desc = ""
+
+    for entry in recent:
+        desc += f"**{entry['date']}** — {entry['message']}\n"
+
+    embed = discord.Embed(
+        title=f"{target.name}'s Check-ins",
+        description=desc,
+        color=CYAN
+    )
+
+    await ctx.send(embed=embed)
+
+# ================= PROFILE =================
 
 @bot.command()
 async def profile(ctx, member: discord.Member = None):
@@ -247,7 +289,7 @@ async def profile(ctx, member: discord.Member = None):
     embed = discord.Embed(title=f"{m.name}'s Profile", color=CYAN)
     embed.add_field(name="XP", value=u["xp"])
     embed.add_field(name="Streak", value=u["streak"])
-    embed.add_field(name="Achievements", value=", ".join(u["achievements"]) or "None", inline=False)
+    embed.add_field(name="Total Check-ins", value=len(u["checkins"]))
 
     await ctx.send(embed=embed)
 
@@ -272,7 +314,6 @@ async def youtube_check():
     data = load_data()
     last_video = data.get("_last_video")
 
-    # Get uploads playlist
     ch_url = (
         "https://www.googleapis.com/youtube/v3/channels"
         f"?part=contentDetails&id={YOUTUBE_CHANNEL_ID}&key={YOUTUBE_API_KEY}"
@@ -283,7 +324,6 @@ async def youtube_check():
 
     uploads_id = ch_res.json()["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
 
-    # Get latest upload
     pl_url = (
         "https://www.googleapis.com/youtube/v3/playlistItems"
         f"?part=snippet&playlistId={uploads_id}&maxResults=1&key={YOUTUBE_API_KEY}"
@@ -305,27 +345,21 @@ async def youtube_check():
     thumb = item["snippet"]["thumbnails"]["high"]["url"]
     link = f"https://www.youtube.com/watch?v={video_id}"
 
-    try:
-        channel = await bot.fetch_channel(YOUTUBE_CH)
+    channel = await bot.fetch_channel(YOUTUBE_CH)
 
-        embed = discord.Embed(
-            title=title,
-            url=link,
-            description="New video is live 🎥",
-            color=CYAN
-        )
-        embed.set_image(url=thumb)
+    embed = discord.Embed(
+        title=title,
+        url=link,
+        description="New video is live 🎥",
+        color=CYAN
+    )
+    embed.set_image(url=thumb)
 
-        await channel.send(
-            content="@everyone",
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions(everyone=True)
-        )
-
-        print("YouTube notification sent")
-
-    except Exception as e:
-        print("Failed to send YouTube message:", e)
+    await channel.send(
+        content="@everyone",
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions(everyone=True)
+    )
 
 # ================= START =================
 
