@@ -6,6 +6,7 @@ import os
 import asyncio
 import random
 import requests
+import io
 from datetime import datetime, timedelta, timezone
 from keep_alive import keep_alive
 
@@ -25,11 +26,16 @@ XP_CHANNELS = [FITNESS_CH, READING_CH, MEDITATION_CH, RESULTS_CH, STAFF_CH]
 WELCOME_CH = 1469368246468612280
 JOIN_ROLE = 1471905446150537435
 VERIFIED_ROLE = 1469697770817585376
-FOCUS_ROLE = 1469680976992014438
 YOUTUBE_CH = 1469374072134570054
 YT_CHANNEL_ID = "UCskSUo642Lbyy1E5wDHt5MA"
 
 ACHIEVEMENT_CH = 1470771286278934640
+
+# Support System Constants
+SUPPORT_PANEL_CH = 1472203030576500849
+TICKET_CATEGORY_ID = 1472203354926092411
+TRANSCRIPT_CH = 1472204145615306895
+SUPPORT_ROLES = [1472198495426318576, 1472197841169678540]
 
 # Message Count Roles
 MSG_ROLES = {
@@ -133,6 +139,47 @@ def make_embed(title, description, footer_extra=""):
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
+# Support System View
+class SupportPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Create Ticket", style=discord.ButtonStyle.primary, custom_id="create_ticket")
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        category = guild.get_channel(TICKET_CATEGORY_ID)
+        
+        # Check if user already has a ticket
+        existing = discord.utils.get(category.text_channels, name=f"ticket-{interaction.user.name.lower()}")
+        if existing:
+            await interaction.response.send_message(f"You already have an open ticket: {existing.mention}", ephemeral=True)
+            return
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True, attach_files=True),
+            guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        for role_id in SUPPORT_ROLES:
+            role = guild.get_role(role_id)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+        ticket_channel = await guild.create_text_channel(
+            name=f"ticket-{interaction.user.name}",
+            category=category,
+            overwrites=overwrites
+        )
+
+        await interaction.response.send_message(f"Ticket created: {ticket_channel.mention}", ephemeral=True)
+        
+        role_mentions = " ".join([f"<@&{rid}>" for rid in SUPPORT_ROLES])
+        embed = make_embed(
+            "Support Ticket", 
+            f"Hello {interaction.user.mention},\n\nSupport will be with you shortly. Please describe your issue in detail.\n\nUse `$close` to end this ticket."
+        )
+        await ticket_channel.send(content=f"{interaction.user.mention} {role_mentions}", embed=embed)
+
 def calculate_score(u):
     xp = u.get("xp", 0)
     focus = u.get("focus_minutes", 0) * 2
@@ -177,6 +224,24 @@ async def on_ready():
     if not youtube_check.is_running():
         youtube_check.start()
 
+    # Persist the support panel view
+    bot.add_view(SupportPanel())
+
+    # Send support panel if not exists
+    data = load_data()
+    channel = bot.get_channel(SUPPORT_PANEL_CH)
+    if channel:
+        # We'll just resend/update if the user wants it professional
+        embed = make_embed(
+            "Anshuman Support", 
+            "Need help or have a question? Click the button below to open a private support ticket.\n\nOur staff team will assist you as soon as possible."
+        )
+        await channel.purge(limit=10) # Clean up old panel
+        await channel.send(content="@everyone", embed=embed, view=SupportPanel())
+        if "_meta" not in data: data["_meta"] = {}
+        data["_meta"]["support_panel_sent"] = True
+        save_data(data)
+
 @bot.event
 async def on_member_join(member):
     data = load_data()
@@ -184,13 +249,10 @@ async def on_member_join(member):
         data["_meta"] = {"total_members": 0, "_last_video": None}
     data["_meta"]["total_members"] = data["_meta"].get("total_members", 0) + 1
     save_data(data)
-
     try:
         role = member.guild.get_role(JOIN_ROLE)
-        if role:
-            await member.add_roles(role)
-    except:
-        pass
+        if role: await member.add_roles(role)
+    except: pass
 
 @bot.event
 async def on_message(message):
@@ -201,8 +263,7 @@ async def on_message(message):
         for user in message.mentions:
             if user.id in active_focus_sessions:
                 session = active_focus_sessions[user.id]
-                end_time = session['end_time']
-                remaining = end_time - datetime.now(timezone.utc)
+                remaining = session['end_time'] - datetime.now(timezone.utc)
                 if remaining.total_seconds() > 0:
                     hours, remainder = divmod(int(remaining.total_seconds()), 3600)
                     minutes, seconds = divmod(remainder, 60)
@@ -212,10 +273,8 @@ async def on_message(message):
 
     if message.channel.id == INTRODUCE_CH:
         if not message.interaction:
-            try:
-                await message.delete()
-            except:
-                pass
+            try: await message.delete()
+            except: pass
             return
 
     if len(message.content.strip()) < 3:
@@ -241,7 +300,6 @@ async def on_message(message):
     channel_counts = user.get("channel_messages", {})
     channel_counts[ch_id] = channel_counts.get(ch_id, 0) + 1
     user["channel_messages"] = channel_counts
-    
     save_data(data)
 
     member = message.author
@@ -265,45 +323,25 @@ async def on_message(message):
                         await member.add_roles(role)
                         await notify_achievement(member, role.name, role.mention)
                     except: pass
-                else:
-                    await notify_achievement(member, ach["name"])
 
     if message.channel.id in XP_CHANNELS:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        ch_key = str(message.channel.id)
-
-        if "daily" not in user:
-            user["daily"] = {}
-
-        if today not in user["daily"]:
-            user["daily"][today] = {}
-
-        if not isinstance(user["daily"].get(today), dict):
-            user["daily"][today] = {}
-
-        day_data = user["daily"].get(today, {})
-        if ch_key not in day_data:
-            user["daily"][today] = day_data
-            user["daily"][today][ch_key] = True
-            
+        if "daily" not in user: user["daily"] = {}
+        if today not in user["daily"]: user["daily"][today] = False
+        if user["daily"][today] is False:
+            user["daily"][today] = True
             last_active = user.get("last_active")
             if last_active:
                 yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
-                if last_active == yesterday:
-                    user["streak"] = user.get("streak", 0) + 1
+                if last_active == yesterday: user["streak"] = user.get("streak", 0) + 1
                 elif last_active != today:
                     user["streak"] = 1
                     user["xp"] = 0 
-            else:
-                user["streak"] = 1
-
+            else: user["streak"] = 1
             user["xp"] = user.get("xp", 0) + 10
             user["last_active"] = today
-            data[uid] = user
             save_data(data)
-
-            if isinstance(member, discord.Member):
-                await update_level_roles(member, user["xp"])
+            if isinstance(member, discord.Member): await update_level_roles(member, user["xp"])
 
     await bot.process_commands(message)
 
@@ -312,19 +350,14 @@ async def prefix_xp(ctx, member: discord.Member = None):
     target = member or ctx.author
     data = load_data()
     user = get_user_data(data, target.id)
-    xp = user.get("xp", 0)
-    streak = user.get("streak", 0)
-    embed = make_embed(f"{target.display_name}'s Stats", f"**XP:** {xp}\n**Streak:** {streak} day(s)")
+    embed = make_embed(f"{target.display_name}'s Stats", f"**XP:** {user.get('xp', 0)}\n**Streak:** {user.get('streak', 0)} day(s)")
     embed.set_thumbnail(url=target.display_avatar.url)
     await ctx.send(embed=embed)
 
 @bot.command(name="xpguide")
 @commands.has_permissions(administrator=True)
 async def prefix_xpguide(ctx):
-    desc = "**How XP works:**\n"
-    desc += "- Get 10 XP per day per channel for messaging in designated focus channels.\n"
-    desc += "- **STREAK RESET:** If you miss even 1 day without sending an XP-earning message, your streak resets to 1 and your XP resets to 0. Discipline is key!\n\n"
-    desc += "**XP Roles:**\n"
+    desc = "**How XP works:**\n- Get 10 XP per day total for messaging in designated focus channels.\n- **STREAK RESET:** If you miss even 1 day without sending an XP-earning message, your streak resets to 1 and your XP resets to 0.\n\n**XP Roles:**\n"
     for role_id, threshold in XP_MILESTONE_ROLES.items():
         desc += f"- <@&{role_id}>: {threshold} XP\n"
     await ctx.send(embed=make_embed("XP Guide", desc))
@@ -334,20 +367,15 @@ async def prefix_info(ctx, member: discord.Member = None):
     target = member or ctx.author
     data = load_data()
     user = get_user_data(data, target.id)
-    xp = user.get("xp", 0)
-    streak = user.get("streak", 0)
-    total_msg = user.get("total_messages", 0)
     intro_text = "No introduction yet."
     if user.get("introduce"):
         intro = user["introduce"]
         intro_text = f"**Name:** {intro.get('name')}\n**Goals:** {intro.get('goals')}"
     achievement_roles = []
-    ach_ids = list(MSG_ROLES.keys()) + [FIRST_STEP_ROLE, READER_ROLE, FOCUSED_MIND_ACH_ROLE, PROOF_OF_WORK_ACH_ROLE, FOCUS_ROLE]
+    ach_ids = list(MSG_ROLES.keys()) + [FIRST_STEP_ROLE, READER_ROLE, FOCUSED_MIND_ACH_ROLE, PROOF_OF_WORK_ACH_ROLE]
     for role in target.roles:
-        if role.id in ach_ids:
-            achievement_roles.append(role.mention)
-    ach_text = ", ".join(achievement_roles) if achievement_roles else "None"
-    embed = make_embed(f"Info: {target.display_name}", f"**XP:** {xp}\n**Streak:** {streak} days\n**Total Messages:** {total_msg}\n\n**Introduction:**\n{intro_text}\n\n**Achievements:**\n{ach_text}")
+        if role.id in ach_ids: achievement_roles.append(role.mention)
+    embed = make_embed(f"Info: {target.display_name}", f"**XP:** {user.get('xp')}\n**Streak:** {user.get('streak')} days\n**Total Messages:** {user.get('total_messages')}\n\n**Introduction:**\n{intro_text}\n\n**Achievements:**\n{', '.join(achievement_roles) if achievement_roles else 'None'}")
     embed.set_thumbnail(url=target.display_avatar.url)
     await ctx.send(embed=embed)
 
@@ -355,15 +383,11 @@ async def prefix_info(ctx, member: discord.Member = None):
 async def prefix_rank(ctx, member: discord.Member = None):
     target = member or ctx.author
     data = load_data()
-    user_list = []
-    for uid, u in data.items():
-        if uid.startswith("_"): continue
-        user_list.append((uid, calculate_score(u)))
+    user_list = [(uid, calculate_score(u)) for uid, u in data.items() if not uid.startswith("_")]
     user_list.sort(key=lambda x: x[1], reverse=True)
     rank = next((i + 1 for i, (uid, _) in enumerate(user_list) if int(uid) == target.id), "N/A")
     user_data = get_user_data(data, target.id)
-    score = calculate_score(user_data)
-    embed = make_embed(f"Rank: {target.display_name}", f"**Global Rank:** #{rank}\n**Total Score:** {int(score)}\n**XP:** {user_data.get('xp')}\n**Focus:** {user_data.get('focus_minutes')}m")
+    embed = make_embed(f"Rank: {target.display_name}", f"**Global Rank:** #{rank}\n**Total Score:** {int(calculate_score(user_data))}\n**XP:** {user_data.get('xp')}\n**Focus:** {user_data.get('focus_minutes')}m")
     embed.set_thumbnail(url=target.display_avatar.url)
     await ctx.send(embed=embed)
 
@@ -375,10 +399,8 @@ async def prefix_wins(ctx, member: discord.Member = None):
     wins = user.get("wins", [])
     desc = f"Total Wins: **{len(wins)}**\n\n"
     if wins:
-        for i, win in enumerate(reversed(wins[-10:])):
-            desc += f"**{i+1}.** {win.get('text')} ({win.get('date')})\n"
-    else:
-        desc += "No wins recorded yet."
+        for i, win in enumerate(reversed(wins[-10:])): desc += f"**{i+1}.** {win.get('text')} ({win.get('date')})\n"
+    else: desc += "No wins recorded yet."
     await ctx.send(embed=make_embed(f"Wins: {target.display_name}", desc.strip()))
 
 @bot.command(name="checkin")
@@ -389,10 +411,8 @@ async def prefix_checkin_list(ctx, member: discord.Member = None):
     checkins = user.get("checkins", [])
     desc = f"Total Check-ins: **{len(checkins)}**\n\n"
     if checkins:
-        for ci in reversed(checkins[-5:]):
-            desc += f"{ci['date']}: {ci['message']}\n"
-    else:
-        desc += "No check-ins yet."
+        for ci in reversed(checkins[-5:]): desc += f"{ci['date']}: {ci['message']}\n"
+    else: desc += "No check-ins yet."
     await ctx.send(embed=make_embed(f"Check-ins: {target.display_name}", desc.strip()))
 
 @bot.command(name="focus")
@@ -401,8 +421,7 @@ async def prefix_focus_stats(ctx, member: discord.Member = None):
     data = load_data()
     user = get_user_data(data, target.id)
     minutes = user.get("focus_minutes", 0)
-    hours = round(minutes / 60, 2)
-    embed = make_embed(f"Focus Time: {target.display_name}", f"Total Lock-in Time: **{hours} hours** ({minutes} minutes)")
+    embed = make_embed(f"Focus Time: {target.display_name}", f"Total Lock-in Time: **{round(minutes/60, 2)} hours** ({minutes} minutes)")
     embed.set_thumbnail(url=target.display_avatar.url)
     await ctx.send(embed=embed)
 
@@ -413,75 +432,71 @@ async def prefix_clear(ctx):
 
 @bot.command(name="commands")
 async def prefix_commands(ctx):
-    desc = "**Available Commands ($):**\n"
-    desc += "`$xp` - View your XP and streak\n"
-    desc += "`$info` - View full user profile and achievements\n"
-    desc += "`$rank` - View your global discipline rank\n"
-    desc += "`$wins` - View win history\n"
-    desc += "`$checkin` - View check-in history\n"
-    desc += "`$focus` - View total lock-in hours\n"
-    desc += "`$introduce` - View self or user intro\n"
-    desc += "`$leaderboard` - Rank by XP, lock-in, and more\n"
-    desc += "`$achievements` - View user achievements\n\n"
-    desc += "**Slash Commands (/):**\n"
-    desc += "`/introduce` - Create your intro\n"
-    desc += "`/checkin` - Quick check-in\n"
-    desc += "`/focus` - Enter focus mode (timed)\n"
-    desc += "`/wins` - Share a win\n"
+    desc = "**Available Commands ($):**\n`$xp`, `$info`, `$rank`, `$wins`, `$checkin`, `$focus`, `$introduce`, `$leaderboard`, `$achievements`"
     await ctx.send(embed=make_embed("Anshuman Gang Commands", desc))
 
-@bot.command(name="achievements")
-async def prefix_achievements_user(ctx, member: discord.Member = None):
-    target = member or ctx.author
-    achievement_roles = []
-    ach_ids = list(MSG_ROLES.keys()) + [FIRST_STEP_ROLE, READER_ROLE, FOCUSED_MIND_ACH_ROLE, PROOF_OF_WORK_ACH_ROLE]
-    for role in target.roles:
-        if role.id in ach_ids:
-            achievement_roles.append(role.mention)
-    ach_text = ", ".join(achievement_roles) if achievement_roles else "None"
-    embed = make_embed(f"Achievements: {target.display_name}", ach_text)
-    embed.set_thumbnail(url=target.display_avatar.url)
-    await ctx.send(embed=embed)
+@bot.command(name="close")
+async def close_ticket(ctx):
+    if not ctx.channel.name.startswith("ticket-"):
+        return
 
-@bot.command(name="achievementsguide")
-@commands.has_permissions(administrator=True)
-async def prefix_achievementsguide(ctx):
-    desc = "**How to get Achievements:**\n\n"
-    desc += f"1. **First Step** (<@&{FIRST_STEP_ROLE}>): Send your 1st message in any channel.\n"
-    desc += f"2. **Reader** (<@&{READER_ROLE}>): Send 100 messages in <#{READING_CH}>.\n"
-    desc += f"3. **Focused Mind** (<@&{FOCUSED_MIND_ACH_ROLE}>): Send 100 messages in <#{MEDITATION_CH}>.\n"
-    desc += f"4. **Proof of Work** (<@&{PROOF_OF_WORK_ACH_ROLE}>): Use `/win` in <#{RESULTS_CH}>.\n\n"
-    desc += "**Message Milestones:**\n"
-    for role_id, count in MSG_ROLES.items():
-        desc += f"- <@&{role_id}>: {count} total messages\n"
-    await ctx.send(embed=make_embed("Achievements Guide", desc))
+    # Permissions check: Only specific support roles can close
+    member_roles = [r.id for r in ctx.author.roles]
+    if not any(rid in SUPPORT_ROLES for rid in member_roles) and not ctx.author.guild_permissions.administrator:
+        await ctx.send("Only support staff can close this ticket.", delete_after=5)
+        return
 
-@bot.tree.command(name="checkin", description="Simple check-in command")
+    await ctx.send("Closing ticket and generating transcript...")
+    
+    # Generate Transcript
+    messages = []
+    async for msg in ctx.channel.history(limit=None, oldest_first=True):
+        timestamp = msg.created_at.strftime("%Y-%m-%d %H:%M:%S")
+        messages.append(f"[{timestamp}] {msg.author}: {msg.content}")
+    
+    transcript_text = "\n".join(messages)
+    file = discord.File(io.StringIO(transcript_text), filename=f"transcript-{ctx.channel.name}.txt")
+    
+    transcript_ch = bot.get_channel(TRANSCRIPT_CH)
+    if transcript_ch:
+        await transcript_ch.send(f"Transcript for {ctx.channel.name} closed by {ctx.author.mention}", file=file)
+    
+    await ctx.channel.delete()
+
+@bot.command(name="leaderboard")
+async def prefix_leaderboard(ctx):
+    data = load_data()
+    users = [(uid, calculate_score(u), u.get("xp", 0), u.get("focus_minutes", 0)) for uid, u in data.items() if not uid.startswith("_")]
+    users.sort(key=lambda x: x[1], reverse=True)
+    top_10 = users[:10]
+    desc = "**Ranked by XP, Focus Time, and Discipline:**\n\n"
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (uid, s, xp, focus) in enumerate(top_10):
+        prefix = medals[i] if i < 3 else f"**{i+1}.**"
+        desc += f"{prefix} <@{uid}> — **{int(s)} Score** (XP: {xp} | Focus: {focus}m)\n"
+    await ctx.send(embed=make_embed("Global Leaderboard", desc.strip()))
+
+@bot.tree.command(name="checkin")
 async def slash_checkin_simple(interaction: discord.Interaction):
-    await interaction.response.send_message("Check-in recorded! Keep up the great work.", ephemeral=True)
+    await interaction.response.send_message("Check-in recorded!", ephemeral=True)
     data = load_data()
     user = get_user_data(data, interaction.user.id)
     user["checkins"].append({"date": datetime.now(timezone.utc).strftime("%Y-%m-%d %I:%M %p"), "message": "Simple check-in"})
     save_data(data)
 
-@bot.tree.command(name="wins", description="Share your win with the community")
-@app_commands.describe(text="Describe your win", image="Attach an image (optional)")
+@bot.tree.command(name="wins")
+@app_commands.describe(text="Describe your win")
 async def slash_wins(interaction: discord.Interaction, text: str, image: discord.Attachment = None):
     data = load_data()
     user = get_user_data(data, interaction.user.id)
-    win_entry = {"text": text, "date": datetime.now(timezone.utc).strftime("%Y-%m-%d %I:%M %p"), "image": image.url if image else None}
-    if "wins" not in user: user["wins"] = []
-    user["wins"].append(win_entry)
+    user.setdefault("wins", []).append({"text": text, "date": datetime.now(timezone.utc).strftime("%Y-%m-%d %I:%M %p"), "image": image.url if image else None})
     save_data(data)
     if interaction.channel_id == RESULTS_CH:
-        member = interaction.guild.get_member(interaction.user.id) if interaction.guild else None
-        if member:
-            role = interaction.guild.get_role(PROOF_OF_WORK_ACH_ROLE)
-            if role and role not in member.roles:
-                try:
-                    await member.add_roles(role)
-                    await notify_achievement(member, role.name, role.mention)
-                except: pass
+        member = interaction.guild.get_member(interaction.user.id)
+        role = interaction.guild.get_role(PROOF_OF_WORK_ACH_ROLE)
+        if member and role and role not in member.roles:
+            try: await member.add_roles(role); await notify_achievement(member, role.name, role.mention)
+            except: pass
     embed = make_embed("New Win!", f"{interaction.user.mention} just scored a win!\n\n> {text}")
     embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
     if image: embed.set_image(url=image.url)
@@ -490,85 +505,56 @@ async def slash_wins(interaction: discord.Interaction, text: str, image: discord
 class QuitFocusView(discord.ui.View):
     def __init__(self, user_id, start_time):
         super().__init__(timeout=None)
-        self.user_id = user_id
-        self.start_time = start_time
+        self.user_id, self.start_time = user_id, start_time
     @discord.ui.button(label="Quit Lock-in", style=discord.ButtonStyle.danger)
     async def quit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("This isn't your session.", ephemeral=True)
-            return
+        if interaction.user.id != self.user_id: return
         session = active_focus_sessions.pop(self.user_id, None)
-        if not session:
-            await interaction.response.send_message("Focus session already ended.", ephemeral=True)
-            return
+        if not session: return
         guild = bot.get_guild(GUILD_ID)
         member = guild.get_member(self.user_id)
         if member:
-            try:
-                await member.edit(timed_out_until=None, nick=session['old_nick'])
-                await member.remove_roles(guild.get_role(FOCUS_ROLE))
+            try: await member.edit(timed_out_until=None, nick=session['old_nick'])
             except: pass
-        elapsed = datetime.now(timezone.utc) - self.start_time
-        elapsed_min = int(elapsed.total_seconds() / 60)
+        elapsed_min = int((datetime.now(timezone.utc) - self.start_time).total_seconds() / 60)
         data = load_data()
         user = get_user_data(data, self.user_id)
         user["focus_minutes"] = user.get("focus_minutes", 0) + elapsed_min
         save_data(data)
-        await interaction.response.edit_message(embed=make_embed("Focus Ended", f"You ended your focus early. Total time locked in: **{elapsed_min} minutes**."), view=None)
+        await interaction.response.edit_message(embed=make_embed("Focus Ended", f"Ended early. Time: **{elapsed_min}m**."), view=None)
 
-@bot.tree.command(name="focus", description="Enter focus mode for a set duration")
+@bot.tree.command(name="focus")
 @app_commands.describe(duration="Duration (e.g. 30 min, 1 hour)")
 async def slash_focus(interaction: discord.Interaction, duration: str):
     parts = duration.lower().strip().split()
-    minutes = 0
     try:
         val = int(parts[0])
-        unit = parts[1] if len(parts) > 1 else "min"
-        if "hour" in unit or unit == "h": minutes = val * 60
-        else: minutes = val
-    except:
-        await interaction.response.send_message("Invalid duration.", ephemeral=True)
-        return
-    if minutes <= 0 or minutes > 480:
-        await interaction.response.send_message("Duration must be 1m-8h.", ephemeral=True)
-        return
+        minutes = val * 60 if "hour" in (parts[1] if len(parts) > 1 else "min") or (parts[1] if len(parts) > 1 else "") == "h" else val
+    except: await interaction.response.send_message("Invalid duration.", ephemeral=True); return
+    if not (1 <= minutes <= 480): await interaction.response.send_message("Duration must be 1m-8h.", ephemeral=True); return
     member = interaction.guild.get_member(interaction.user.id)
-    role = interaction.guild.get_role(FOCUS_ROLE)
-    if not role or not member: return
     old_nick = member.display_name
-    new_nick = f"[LOCKED IN] {old_nick}"[:32]
-    start_time = datetime.now(timezone.utc)
-    end_time = start_time + timedelta(minutes=minutes)
-    try:
-        await member.add_roles(role)
-        await member.edit(nick=new_nick, timed_out_until=end_time)
-    except:
-        await interaction.response.send_message("Permission error. My role must be above focus role.", ephemeral=True)
-        return
+    end_time = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    try: await member.edit(nick=f"[LOCKED IN] {old_nick}"[:32], timed_out_until=end_time)
+    except: await interaction.response.send_message("Permission error. Ensure my role is higher.", ephemeral=True); return
     active_focus_sessions[member.id] = {"end_time": end_time, "old_nick": old_nick}
-    await interaction.response.send_message(f"**LOCKED IN.** {member.mention} is now focused for {minutes}m.")
-    try: await member.send(embed=make_embed("Lock-in Started", f"You are locked in for **{minutes} minutes**. Stay disciplined!"), view=QuitFocusView(member.id, start_time))
+    await interaction.response.send_message(f"**LOCKED IN.** {member.mention} is focused for {minutes}m.")
+    try: await member.send(embed=make_embed("Lock-in Started", f"Focused for **{minutes}m**."), view=QuitFocusView(member.id, datetime.now(timezone.utc)))
     except: pass
     await asyncio.sleep(minutes * 60)
     if member.id in active_focus_sessions:
         session = active_focus_sessions.pop(member.id)
-        try:
-            await member.remove_roles(role)
-            await member.edit(nick=session['old_nick'])
+        try: await member.edit(nick=session['old_nick'])
         except: pass
         data = load_data()
         user = get_user_data(data, member.id)
         user["focus_minutes"] = user.get("focus_minutes", 0) + minutes
         save_data(data)
-        try: await member.send(embed=make_embed("Focus Complete", "Lock-in complete!"))
-        except: pass
 
-@bot.tree.command(name="introduce", description="Introduce yourself and verify")
-@app_commands.describe(name="Your name", age="Your age", location="Where you're from", goals="Your goals", picture="A picture (optional)")
+@bot.tree.command(name="introduce")
+@app_commands.describe(name="Your name", age="Age", location="Location", goals="Goals")
 async def slash_introduce(interaction: discord.Interaction, name: str, age: int, location: str, goals: str, picture: discord.Attachment = None):
-    if interaction.channel_id != INTRODUCE_CH:
-        await interaction.response.send_message(f"Use this in <#{INTRODUCE_CH}>", ephemeral=True)
-        return
+    if interaction.channel_id != INTRODUCE_CH: await interaction.response.send_message(f"Use <#{INTRODUCE_CH}>", ephemeral=True); return
     data = load_data()
     user = get_user_data(data, interaction.user.id)
     user["introduce"] = {"name": name, "age": age, "location": location, "goals": goals, "picture": picture.url if picture else None}
@@ -588,36 +574,6 @@ async def slash_introduce(interaction: discord.Interaction, name: str, age: int,
     embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
     if picture: embed.set_image(url=picture.url)
     await interaction.response.send_message(embed=embed)
-
-@bot.command(name="introduce")
-async def prefix_introduce(ctx, member: discord.Member = None):
-    target = member or ctx.author
-    data = load_data()
-    user = get_user_data(data, target.id)
-    if not user.get("introduce"):
-        await ctx.send(f"{target.mention} has not introduced yet.")
-        return
-    intro = user["introduce"]
-    embed = make_embed("Introduction", f"**Name:** {intro['name']}\n**Age:** {intro['age']}\n**Location:** {intro['location']}\n**Goals:** {intro['goals']}")
-    embed.set_author(name=target.display_name, icon_url=target.display_avatar.url)
-    if intro.get("picture"): embed.set_image(url=intro["picture"])
-    await ctx.send(embed=embed)
-
-@bot.command(name="leaderboard")
-async def prefix_leaderboard(ctx):
-    data = load_data()
-    users = [(uid, calculate_score(u), u.get("xp", 0), u.get("focus_minutes", 0)) for uid, u in data.items() if not uid.startswith("_")]
-    users.sort(key=lambda x: x[1], reverse=True)
-    top_10 = users[:10]
-    if not top_10:
-        await ctx.send("No users yet.")
-        return
-    desc = "**Ranked by XP, Focus Time, and Discipline:**\n\n"
-    medals = ["🥇", "🥈", "🥉"]
-    for i, (uid, s, xp, focus) in enumerate(top_10):
-        prefix = medals[i] if i < 3 else f"**{i+1}.**"
-        desc += f"{prefix} <@{uid}> — **{int(s)} Score** (XP: {xp} | Focus: {focus}m)\n"
-    await ctx.send(embed=make_embed("Global Leaderboard", desc.strip()))
 
 def get_uploads_playlist_id():
     api_key = os.getenv("YOUTUBE_API_KEY")
@@ -665,8 +621,7 @@ async def youtube_check():
     except: pass
 
 @youtube_check.before_loop
-async def before_youtube_check():
-    await bot.wait_until_ready()
+async def before_youtube_check(): await bot.wait_until_ready()
 
 keep_alive()
 bot.run(os.getenv("BOT_TOKEN", ""))
